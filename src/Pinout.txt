@@ -1,5 +1,5 @@
 /***************************
-Pinout - Arduino 1 Communication
+Pinout - Communication Board
 ADC6
 ADC7
 AREF
@@ -28,7 +28,7 @@ PD6
 PD7
 
 
-Pinout - Arduino 2
+Pinout - On Board Computer
 ADC6 <--- Temperature sensor LM35
 ADC7 <--- Battery Voltage
 AREF

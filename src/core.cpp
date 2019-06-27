@@ -7,10 +7,12 @@
 
 
 #include "stdlib.h"
+#include "stdint.h"
 #include <stdio.h>
 #include <inttypes.h>
 //#include <avr/wdt.h>
 #include <avr/eeprom.h>
+#include <string.h>
 
 #include <avr/io.h>
 #include <util/delay.h>
@@ -20,15 +22,18 @@
 #include <Wire.h>
 #include "Usart.h"
 #include "DS3231.h"
-//#include "TimerOne.h"
+#include "TimerOne.h"
 
 #include "FAT/SDCard.h"
 #include "FAT/FAT.h"
 #include "FAT/File.h"
 #include "FAT/SPISD.h"
 #include "Battery.h"
+#include "NEO6M.h"
 
 #include "Error.h"
+
+NEO6M GPS;
 
 SDCard disk(&PORTB, &DDRB, PB2);
 
@@ -45,10 +50,18 @@ uint8_t Fig_Count=0;
 
 BATTERY Battery;
 
-uint64_t time;
+uint64_t time=0;
 uint16_t count_photo=0;
 
 #include <avr/wdt.h>
+
+#define CAN_POWER_UP() GPIO.Clear_bit(2,GPIOA)
+#define CAN_POWER_DOWN() GPIO.Set_bit(2,GPIOA)
+#define SD_POWER_UP() PORTB &= ~(1<<PB0)//enable SD_card
+#define SD_POWER_DOWN() PORTB |= (1<<PB0) //disable SD_Card
+#define PARACHUTE_DEPLOY() PORTB |= (1<<PB1)
+#define PARACHUTE_SETUP() DDRB |= (1<<PB0); PORTB &= ~(1<<PB1)
+
 
 /******************************************************************
  * Soft reset
@@ -121,6 +134,9 @@ void handle_error()
     case SDCard::Error::CMD24:
     	printf_P(PSTR("card returned an error response for CMD24 (write block)\r\n"));
         break;
+    case SDCard::Error::READ_TIMEOUT:
+    	printf_P(PSTR("timeout while waiting for start of read data\r\n"));
+        break;
     default:
         printf_P(PSTR("Unknown error. Code %x\r\n"), (uint8_t)disk.get_error());
         break;
@@ -162,10 +178,19 @@ int Std_putchar(char c, FILE *stream) {
 /******************************************************************
  * Initialize SD Card
  ******************************************************************/
+
+
 void SD_Init(void){
 
+	//Operating Voltage: 2.7V to 3.6V
+
 	DDRB |= (1<<PB0);
-	PORTB &= ~(1<<PB0);
+	SD_POWER_DOWN();
+	disk.select();
+	_delay_ms(2000);
+	disk.deselect();
+	SD_POWER_UP();
+	_delay_ms(2000);
 
     printf_P(PSTR("Initializing SD card...\r\n"));
     if(disk.init()){
@@ -216,63 +241,26 @@ void SD_Restart() {
 }
 
 
-void ReadLine(){
-
-	uint8_t serial_data=0;
-	//find the first character
-	while(serial_data!='$')
-		serial_data=USART.read();
-
-	uint8_t buffer[200];
-	uint8_t *buffer_p;
-
-	buffer_p = buffer;
-	*buffer_p=0;
-	while(*buffer_p != '\n')
-		if (USART.available()>0)
-			*buffer_p++ =USART.read();
-
-	*buffer_p++ = '\r';
-	*buffer_p = '\n';
-
-	USART.writeBytes(buffer, buffer_p-buffer+1);
-
-}
 
 /******************************************************************
  * Main setup
  ******************************************************************/
-void setup() {
+inline void setup() {
 
 	WDT_off();
 
 	_delay_ms(1000);
 
-	USART.begin(9600,512);
+	USART.begin(9600,70);
 
 	//BUG - On the AVR, using the serial port direct can cause a BUG in the stdout
-	//TO avoid this BUG, first use the stdout
+	//To avoid this BUG, first use the stdout
 	stdout = fdevopen(Std_putchar, NULL);
 	//    stdin  = fdevopen(NULL, uart_getchar);
 
 	printf_P(PSTR("Serial OK\r\n"));
 
-	//liga o SD_Card e GSP
-//	DDRB |= (1<<PB0);
-//	PORTB &= ~(1<<PB0);
-
 	printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
-
-//	uint8_t setRate[] = {0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0x88, 0x13, 0x01, 0x00, 0x01, 0x00, 0xB1, 0x49};
-//
-//	USART.writeBytes(setRate,sizeof(setRate));
-
-	while(true){
-		if (USART.available()>0)
-			uint8_t dados= USART.read();
-
-	}
-
 
 	SD_Init();
 
@@ -299,7 +287,28 @@ void setup() {
 
 	printf_P(PSTR("Time %d/%d/%d %d:%d:%d\r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss);
 
+	//----------------------------------------------------------
+	if (!GPIO.Initialize(&Wire))
+	{
+		printf_P(PSTR("GPIO init FAIL\r\n"));
+		Failure(GPIO_INIT);
+	}
 
+	//Set GPIO Direction
+	if (!GPIO.Set_Port_Direction(0b11111100,GPIOA))
+	{
+		printf_P(PSTR("GPIO init FAIL\r\n"));
+		Failure(GPIO_INIT);
+	}
+	if (!GPIO.Write_Byte(0b00000001,GPIOA))
+	{
+		printf_P(PSTR("GPIO init FAIL\r\n"));
+		Failure(GPIO_INIT);
+	}
+
+	printf_P(PSTR("GPIO init OK\r\n"));
+	//----------------------------------------------------------
+	CAN_POWER_UP();
 	if (!Can.Initialize(&Wire))
 	{
 		printf_P(PSTR("Camera init FAIL\r\n"));
@@ -316,27 +325,10 @@ void setup() {
 
 	printf_P(PSTR("Camera init OK\r\n"));
 
-	if (!GPIO.Initialize(&Wire))
-	{
-		printf_P(PSTR("GPIO init FAIL\r\n"));
-		Failure(GPIO_INIT);
-	}
-
-	//Set GPIO Direction
-	if (!GPIO.Set_Port_Direction(0b11111110,GPIOA))
-	{
-		printf_P(PSTR("GPIO init FAIL\r\n"));
-		Failure(GPIO_INIT);
-	}
-	if (!GPIO.Write_Byte(0b00000001,GPIOA))
-	{
-		printf_P(PSTR("GPIO init FAIL\r\n"));
-		Failure(GPIO_INIT);
-	}
-
-	printf_P(PSTR("GPIO init OK\r\n"));
 
 
+	//----------------------------------------------------------
+	//TODO - Colocar na memoria flash
     if(!Sensor_log.open(root, "SENSOR.TXT", File::O_CREAT | File::O_RDWR | File::O_APPEND)){
 
     	printf_P(PSTR("Unable to open SENSOR.TXT\r\n"));
@@ -349,26 +341,52 @@ void setup() {
 
     printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
 
+    //----------------------------------------------------------
     Battery.initialize();
 
     printf_P(PSTR("Battery Voltage Sensor OK\r\n"));
 
+    //----------------------------------------------------------
     file_log.sync();
 
     count_photo = eeprom_read_word(0);
 
-//    time=0;
-//	Timer1.initialize(1000000,9);//1 segundo
-//	Timer1.attachInterrupt( timerIsr ); // attach the service routine here
-//
-//    printf_P(PSTR("Timer 1 init OK\r\n"));
+    //----------------------------------------------------------
+	while(!GPS.Initialize(&USART)){
+		printf_P(PSTR("GPS Fail\r\n"));
+	}
 
-//	file_log.close();
+	while(!GPS.is_position_valid()){
+		GPS.Status_Read();
+		printf_P(PSTR("Waiting for the GPS position\r\n"));
+	}
 
-//	while(true);
+	printf_P(PSTR("GPS OK\r\n"));
 
-	// initialize serial communication
-	//USART.begin(250000);
+
+	//Parashute Setup------------------------------------------------
+
+	Timer1.initialize();
+	Timer1.attachInterrupt(timerIsr);
+
+	uint64_t counter=0;
+
+	while(counter<2)
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+			counter=time;
+			_delay_ms(100);
+		}
+
+	printf_P(PSTR("Timer OK\r\n"));
+
+	PARACHUTE_SETUP();
+
+	printf_P(PSTR("Setup Finished \r\n"));
+	//send to the communication module that the CubeSat is ready to fly
+	while(!GPIO.Set_bit(1,GPIOA));
+
+	printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+	printf_P(PSTR("Ready to fly\r\n"));
 
 //	DateTime rtc_date(2019,1,19,12,03,00);
 //	rtc.Adjust_Time(rtc_date);
@@ -381,19 +399,35 @@ void Sensor_read()
 
     double Bat = Battery.Read_Voltage();
     rtc.Read();
+    rtc.Read_Temperature();
     double rtc_temp = rtc.Get_Temperature();
-    char buffer[60];
-    sprintf_P(buffer, PSTR("%d/%d/%d %d:%d:%d ; %.4f ; %.4f ; %d \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss,rtc_temp,Bat,getFreeMCUMemory());
-	Sensor_log.write((const uint8_t*)buffer, strlen(buffer));
-	printf_P(PSTR("%d/%d/%d %d:%d:%d \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss);
 
+//    printf_P(PSTR("Reading GPS Status \r\n"));
+    GPS.Status_Read();
+    char status[15];
+    if(GPS.is_position_valid())
+    {
+    	strcpy_P(status, PSTR("GPS OK"));
+    	printf_P(PSTR("GPS position is valid\r\n"));
+    }
+    else
+    {
+    	strcpy_P(status,PSTR("GPS Fail"));
+    	printf_P(PSTR("GPS position is invalid\r\n"));
+    }
+
+    GPS.ECEF_Read();
+    GPS.NED_VEL_Read();
+
+    char buffer[200];
+    sprintf_P(buffer, PSTR("%d/%d/%d %d:%d:%d ; %.4f ; %.4f ; %d ; %s ;  %li ; %li ; %li ; %li ; %li ; %li \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss,rtc_temp,Bat,getFreeMCUMemory(),status,GPS.ECEF_X,GPS.ECEF_Y,GPS.ECEF_Z,GPS.NED_Vel_N,GPS.NED_Vel_E,GPS.NED_Vel_D);
+	Sensor_log.write((const uint8_t*)buffer, strlen(buffer));
+	//printf_P(PSTR("%d/%d/%d %d:%d:%d \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss);
+	printf(buffer);
 }
 
-
-void loop() {
-
-
-	char buffer[20];
+void Save_sensores(){
+	char buffer[12];
 	sprintf_P(buffer, PSTR("SENSOR.TXT"));
     if(!Sensor_log.open(root, buffer, File::O_CREAT | File::O_RDWR | File::O_APPEND)){
 
@@ -402,15 +436,19 @@ void loop() {
     	Failure(FILE_OPEN);
     }
     else{
+    	printf_P(PSTR("Save sensor data\r\n"));
 		Sensor_read();
 		Sensor_log.close();
     }
+}
 
+void Save_image(){
 
+	char buffer[12];
 	sprintf_P(buffer, PSTR("i%d.bmp"),count_photo);
     if(!Image.open(root, buffer, File::O_CREAT | File::O_RDWR )){
 
-    	printf_P(PSTR("Unable to create the image file\r\n"));
+    	printf_P(PSTR("Unable to create the image\r\n"));
     	handle_error();
     	Failure(FILE_OPEN);
     }
@@ -425,11 +463,11 @@ void loop() {
     		Can.Read_and_Save_Image();
     	}
 
-    	printf_P(PSTR("Closing the image file %d\r\n"), count_photo);
+    	printf_P(PSTR("Closing the image %d\r\n"), count_photo);
 
     	if(!Image.close())
     	{
-    		printf_P(PSTR("Fail to close the image file %d\r\n"), count_photo);
+    		printf_P(PSTR("Failed to close the image %d\r\n"), count_photo);
     		handle_error();
     		Failure(FILE_CLOSE);
     	}
@@ -441,13 +479,51 @@ void loop() {
 
     }
 
-    printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+}
+
+void Sync_Log(){
 
     if(!file_log.sync()){
     	printf_P(PSTR("Fail to Sync\r\n"));
 		handle_error();
 		Failure(FILE_SYNC);
     }
+
+}
+
+
+void Free_fall(){
+
+	GPS.NED_VEL_Read();
+	static uint64_t counter=0;
+	uint64_t delta_time;
+
+	if((GPS.NED_Vel_D/100.0) > 10.0){
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+			delta_time = time - counter;
+		}
+
+		if(delta_time>120)
+			PARACHUTE_DEPLOY();
+	}
+	else
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+			counter = time;
+		}
+
+}
+
+void loop() {
+
+
+	Save_sensores();
+
+	Free_fall();
+
+	Save_image();
+
+	Sync_Log();
+
 
 	//One minute of delay
 	_delay_ms(5000);
