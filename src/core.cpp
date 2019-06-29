@@ -30,6 +30,7 @@
 #include "FAT/SPISD.h"
 #include "Battery.h"
 #include "NEO6M.h"
+#include "LM35.h"
 
 #include "Error.h"
 
@@ -49,6 +50,8 @@ MCP23017 GPIO(0);
 uint8_t Fig_Count=0;
 
 BATTERY Battery;
+
+LM35 Temp_1(6,3);
 
 uint64_t time=0;
 uint16_t count_photo=0;
@@ -260,6 +263,8 @@ inline void setup() {
 
 	printf_P(PSTR("Serial OK\r\n"));
 
+	printf_P(PSTR("VSAT Mission 1. Firmeware 1.0\r\n"));
+
 	printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
 
 	SD_Init();
@@ -325,8 +330,6 @@ inline void setup() {
 
 	printf_P(PSTR("Camera init OK\r\n"));
 
-
-
 	//----------------------------------------------------------
 	//TODO - Colocar na memoria flash
     if(!Sensor_log.open(root, "SENSOR.TXT", File::O_CREAT | File::O_RDWR | File::O_APPEND)){
@@ -346,6 +349,11 @@ inline void setup() {
 
     printf_P(PSTR("Battery Voltage Sensor OK\r\n"));
 
+    //----------------------------------------------------------
+
+    Temp_1.initialize();
+
+    printf_P(PSTR("LM35 OK\r\n"));
     //----------------------------------------------------------
     file_log.sync();
 
