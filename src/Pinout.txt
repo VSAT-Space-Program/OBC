@@ -3,7 +3,7 @@ Pinout - Communication Board
 ADC6
 ADC7
 AREF
-PB0 <--- Enable Arduino 
+PB0 <--- READY_TO_FLY
 PB1 ---> 
 PB2 ---> 
 PB3 ---> Enable TX Lora
@@ -33,7 +33,7 @@ ADC6 <--- Temperature sensor LM35
 ADC7 <--- Battery Voltage
 AREF
 PB0 ---> POWER_SDCARD 
-PB1 <---
+PB1 ---> Temperature Control (PWM TIMER1)
 PB2 ---> SPI CS
 PB3 ---> SPI MOSI
 PB4 <--- SPI MISO
@@ -53,14 +53,14 @@ PD2 ---> AL422_RRST (Write Reset Input: initializes the read address to 0)
 PD3 ---> AL422_WRST (Write Reset Input: initializes the write address to 0)
 PD4 ---> AL422_WEN  (Write Enable Input)
 PD5 ---> AL422_RCK  (Read Clock Input)
-PD6 ---> RESET OV7670 (3.0v ?)
+PD6 ---> RESET_OV7670 (3.0v ?)
 PD7 <--- OV7670_VSYNC
 
 MCP23017
 GPIOA0 ---> POWER_CAN (1: Power down 0: Run)
-GPIOA1 ---> READY TO FLY (1: OK 0: Not Ready)
+GPIOA1 ---> READY_TO_FLY (1: OK 0: Not Ready)
 GPIOA2 ---> POWER_UP_GPS (1: Power down 0: Run)
-GPIOA3 ---> 
+GPIOA3 ---> PARACHUTE (1: Resease 0: Nothing)
 GPIOA4 ---> 
 GPIOA5 <---
 GPIOA6 <---
@@ -83,8 +83,5 @@ GND ---> OV7670_PWRD (1: Power down mode 0:Normal) (Max voltage 3.0v)
 // I2C used address
 // OV7670   0x21 (0x42 right shifted 1)
 // DS3231   0x68
-// ADXL345  0x53
-// HMC5883L 0x1E
-// ITG_3205 0x68 !!!!! Problem, same address !!!!!
-// PCF8574  0x20 <--> 0x27
+// MCP23017  0x20 <--> 0x21
 // MS5607	0x76 or 0x77
