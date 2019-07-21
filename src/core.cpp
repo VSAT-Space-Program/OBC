@@ -31,6 +31,7 @@
 #include "Battery.h"
 #include "NEO6M.h"
 #include "LM35.h"
+#include "MS5607.h"
 
 #include "Error.h"
 
@@ -53,47 +54,25 @@ BATTERY Battery;
 
 LM35 Temp_1(6,3);
 
+MS5607 Pressure;
+
 uint64_t time=0;
+uint8_t reset_time=0;
 uint16_t count_photo=0;
+
+uint8_t CAN_Disabled;
 
 #include <avr/wdt.h>
 
-#define CAN_POWER_UP() GPIO.Clear_bit(2,GPIOA)
-#define CAN_POWER_DOWN() GPIO.Set_bit(2,GPIOA)
+#define CAN_POWER_UP() GPIO.Clear_bit(0,GPIOA)
+#define CAN_POWER_DOWN() GPIO.Set_bit(0,GPIOA)
 #define SD_POWER_UP() PORTB &= ~(1<<PB0)//enable SD_card
 #define SD_POWER_DOWN() PORTB |= (1<<PB0) //disable SD_Card
-#define PARACHUTE_DEPLOY() PORTB |= (1<<PB1)
-#define PARACHUTE_SETUP() DDRB |= (1<<PB0); PORTB &= ~(1<<PB1)
-
-
-/******************************************************************
- * Soft reset
- ******************************************************************/
-
-#define soft_reset()        \
-do                          \
-{                           \
-    wdt_enable(WDTO_4S);  \
-    for(;;)                 \
-    {                       \
-    }                       \
-} while(0)
-
-void WDT_off(void)
-{
-	cli();
-	wdt_reset();
-	/* Clear WDRF in MCUSR */
-	MCUSR &= ~(1<<WDRF);
-	/* Write logical one to WDCE and WDE */
-	/* Keep old prescaler setting to prevent unintentional
-	time-out */
-	WDTCSR |= (1<<WDCE) | (1<<WDE);
-	/* Turn off WDT */
-	WDTCSR = 0x00;
-
-}
-
+#define PARACHUTE_DEPLOY() GPIO.Set_bit(3,GPIOA)
+#define PARACHUTE_SETUP() GPIO.Clear_bit(3,GPIOA)
+#define READY_TO_FLY() GPIO.Set_bit(1,GPIOA)
+#define GPS_POWER_UP() GPIO.Clear_bit(2,GPIOA)
+#define GPS_POWER_DOWN() GPIO.Set_bit(2,GPIOA)
 
 /******************************************************************
  *
@@ -113,6 +92,11 @@ void timerIsr()
 
 	time++;
 
+	reset_time++;
+
+	//reset the hardware
+	if (reset_time>120)
+		asm volatile ("  jmp 0");
 }
 
 /******************************************************************
@@ -250,7 +234,7 @@ void SD_Restart() {
  ******************************************************************/
 inline void setup() {
 
-	WDT_off();
+	//WDT_off();
 
 	_delay_ms(1000);
 
@@ -265,16 +249,15 @@ inline void setup() {
 
 	printf_P(PSTR("VSAT Mission 1. Firmeware 1.0\r\n"));
 
-	printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+//	printf_P(PSTR("Free Memory %i bytes\r\n"), getFreeMCUMemory());
 
 	SD_Init();
 
-    printf_P(PSTR("Log Init-------------------------------------------------\r\n"));
+    printf_P(PSTR("Log Init------------------------------\r\n"));
 
-    printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+//    printf_P(PSTR("Free Memory %i bytes\r\n"), getFreeMCUMemory());
 
 	Wire.begin();
-
 	printf_P(PSTR("I2C Init OK\r\n"));
 
 	if(rtc.Initialize(&Wire)==false)
@@ -284,11 +267,11 @@ inline void setup() {
 
 	if(rtc.Read()==false)
 	{
-		printf_P(PSTR("Real Time Clock read fail\r\n"));
+		printf_P(PSTR("RTC Fail\r\n"));
 		Failure(RCT_READ);
 	}
 
-	printf_P(PSTR("Real Time Clock init OK\r\n"));
+	printf_P(PSTR("RTC OK\r\n"));
 
 	printf_P(PSTR("Time %d/%d/%d %d:%d:%d\r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss);
 
@@ -300,12 +283,14 @@ inline void setup() {
 	}
 
 	//Set GPIO Direction
-	if (!GPIO.Set_Port_Direction(0b11111100,GPIOA))
+	if (!GPIO.Set_Port_Direction(0b11110000,GPIOA))
 	{
 		printf_P(PSTR("GPIO init FAIL\r\n"));
 		Failure(GPIO_INIT);
 	}
-	if (!GPIO.Write_Byte(0b00000001,GPIOA))
+
+	//This value is define to turn off all devices
+	if (!GPIO.Write_Byte(0b00000101,GPIOA))
 	{
 		printf_P(PSTR("GPIO init FAIL\r\n"));
 		Failure(GPIO_INIT);
@@ -314,6 +299,7 @@ inline void setup() {
 	printf_P(PSTR("GPIO init OK\r\n"));
 	//----------------------------------------------------------
 	CAN_POWER_UP();
+	CAN_Disabled=false;
 	if (!Can.Initialize(&Wire))
 	{
 		printf_P(PSTR("Camera init FAIL\r\n"));
@@ -342,7 +328,7 @@ inline void setup() {
 
     printf_P(PSTR("File opened SENSOR.TXT\r\n"));
 
-    printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+    printf_P(PSTR("Free Memory %i bytes\r\n"), getFreeMCUMemory());
 
     //----------------------------------------------------------
     Battery.initialize();
@@ -350,6 +336,13 @@ inline void setup() {
     printf_P(PSTR("Battery Voltage Sensor OK\r\n"));
 
     //----------------------------------------------------------
+    printf_P(PSTR("Pressure sensor "));
+    if(Pressure.Initialize(&Wire))
+    	 printf_P(PSTR("Fail\r\n"));
+    else
+    	 printf_P(PSTR("OK\r\n"));
+
+	//----------------------------------------------------------
 
     Temp_1.initialize();
 
@@ -360,16 +353,21 @@ inline void setup() {
     count_photo = eeprom_read_word(0);
 
     //----------------------------------------------------------
-	while(!GPS.Initialize(&USART)){
+    GPS_POWER_UP();
+    while(!GPS.Initialize(&USART)){
 		printf_P(PSTR("GPS Fail\r\n"));
 	}
+	printf_P(PSTR("GPS OK\r\n"));
 
-	while(!GPS.is_position_valid()){
-		GPS.Status_Read();
+	bool valid_Position=false;
+	while(!valid_Position){
+		valid_Position = true;
+		for(uint8_t i=0; i<3 ; i++){
+			GPS.Status_Read();
+			valid_Position &= GPS.is_position_valid();
+		}
 		printf_P(PSTR("Waiting for the GPS position\r\n"));
 	}
-
-	printf_P(PSTR("GPS OK\r\n"));
 
 
 	//Parashute Setup------------------------------------------------
@@ -389,12 +387,22 @@ inline void setup() {
 
 	PARACHUTE_SETUP();
 
-	printf_P(PSTR("Setup Finished \r\n"));
+//	printf_P(PSTR("Setup Finished \r\n"));
 	//send to the communication module that the CubeSat is ready to fly
 	while(!GPIO.Set_bit(1,GPIOA));
 
-	printf_P(PSTR("Free Memory %i\r\n"), getFreeMCUMemory());
+//	printf_P(PSTR("Free Memory %i bytes\r\n"), getFreeMCUMemory());
+
+	printf_P(PSTR("Include temperature control \r\n"));
+
+	while(true);
+
+	READY_TO_FLY();
 	printf_P(PSTR("Ready to fly\r\n"));
+
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+		reset_time=0;
+	}
 
 //	DateTime rtc_date(2019,1,19,12,03,00);
 //	rtc.Adjust_Time(rtc_date);
@@ -405,10 +413,10 @@ inline void setup() {
 void Sensor_read()
 {
 
-    double Bat = Battery.Read_Voltage();
+    float Bat = Battery.Read_Voltage();
     rtc.Read();
     rtc.Read_Temperature();
-    double rtc_temp = rtc.Get_Temperature();
+    float rtc_temp = rtc.Get_Temperature();
 
 //    printf_P(PSTR("Reading GPS Status \r\n"));
     GPS.Status_Read();
@@ -416,19 +424,24 @@ void Sensor_read()
     if(GPS.is_position_valid())
     {
     	strcpy_P(status, PSTR("GPS OK"));
-    	printf_P(PSTR("GPS position is valid\r\n"));
+//    	printf_P(PSTR("GPS position is valid\r\n"));
     }
     else
     {
     	strcpy_P(status,PSTR("GPS Fail"));
-    	printf_P(PSTR("GPS position is invalid\r\n"));
+//    	printf_P(PSTR("GPS position is invalid\r\n"));
     }
 
     GPS.ECEF_Read();
     GPS.NED_VEL_Read();
 
+    auto P= 0;//Pressure.getPressure();
+    auto T= Pressure.getTemperature();
+
+    auto LM_t = Temp_1.getC();
+
     char buffer[200];
-    sprintf_P(buffer, PSTR("%d/%d/%d %d:%d:%d ; %.4f ; %.4f ; %d ; %s ;  %li ; %li ; %li ; %li ; %li ; %li \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss,rtc_temp,Bat,getFreeMCUMemory(),status,GPS.ECEF_X,GPS.ECEF_Y,GPS.ECEF_Z,GPS.NED_Vel_N,GPS.NED_Vel_E,GPS.NED_Vel_D);
+    sprintf_P(buffer, PSTR("%d/%d/%d %d:%d:%d; %.4f; %.4f; %.4f; %d; %s;  %.4f; %.4f; %li; %li; %li; %li; %li; %li\r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss,rtc_temp,LM_t ,Bat,getFreeMCUMemory(),status,P,T,GPS.ECEF_X,GPS.ECEF_Y,GPS.ECEF_Z,GPS.NED_Vel_N,GPS.NED_Vel_E,GPS.NED_Vel_D);
 	Sensor_log.write((const uint8_t*)buffer, strlen(buffer));
 	//printf_P(PSTR("%d/%d/%d %d:%d:%d \r\n"),rtc.y+2000,rtc.m,rtc.d,rtc.hh,rtc.mm,rtc.ss);
 	printf(buffer);
@@ -444,7 +457,7 @@ void Save_sensores(){
     	Failure(FILE_OPEN);
     }
     else{
-    	printf_P(PSTR("Save sensor data\r\n"));
+    	printf_P(PSTR("Saving sensor data\r\n"));
 		Sensor_read();
 		Sensor_log.close();
     }
@@ -528,10 +541,19 @@ void loop() {
 
 	Free_fall();
 
-	Save_image();
+	if(Battery.Read_Voltage() < 6){
+		CAN_Disabled=true;
+		printf_P(PSTR("Camera disabled\r\n"));
+	}
+
+	if(!CAN_Disabled)
+		Save_image();
 
 	Sync_Log();
 
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE){
+		reset_time=0;
+	}
 
 	//One minute of delay
 	_delay_ms(5000);
